@@ -11,6 +11,10 @@ Usage:
   # Estimate via custom OpenAI-compatible API
   python scripts/ikp_estimate.py --api-base http://localhost:8000/v1 --model my-model
 
+  # Use a custom judge model/API
+  python scripts/ikp_estimate.py --model openai/gpt-4.1 --judge-model anthropic/claude-sonnet-4 \
+      --judge-api-base https://openrouter.ai/api/v1 --judge-api-key $OPENROUTER_API_KEY
+
   # Use a sample (faster, less accurate)
   python scripts/ikp_estimate.py --model openai/gpt-4.1 --sample 200
 
@@ -144,8 +148,9 @@ def make_query_fn(api_base: str, api_key: str, model: str, is_thinking: bool):
     return query
 
 
-def make_judge_fn(api_key: str):
-    """Create judge function using OpenRouter."""
+def make_judge_fn(api_base: str, api_key: str, judge_model: str):
+    """Create a function that judges model responses."""
+    api_base = api_base.rstrip('/')
 
     def judge(question: str, gold: str, response: str) -> str:
         if not response or not response.strip():
@@ -178,9 +183,9 @@ Reply one word: CORRECT, REFUSAL, or WRONG"""
         with httpx.Client(timeout=60) as http:
             for attempt in range(3):
                 try:
-                    r = http.post("https://openrouter.ai/api/v1/chat/completions",
+                    r = http.post(f"{api_base}/chat/completions",
                                   headers=headers,
-                                  json={"model": JUDGE_MODEL,
+                                  json={"model": judge_model,
                                         "messages": [{"role": "user", "content": prompt}],
                                         "temperature": 0,
                                         "reasoning": {"effort": "low"}})
@@ -345,9 +350,17 @@ def main():
                              help="Model name (OpenRouter ID or custom model name)")
     model_group.add_argument("--api-base", metavar="URL",
                              default="https://openrouter.ai/api/v1",
-                             help="API base URL (default: OpenRouter)")
+                             help="API base URL for the target model (default: OpenRouter)")
     model_group.add_argument("--api-key", metavar="KEY",
-                             help="API key (default: OPENROUTER_API_KEY env var)")
+                             help="API key for the target model (default: OPENROUTER_API_KEY env var)")
+    model_group.add_argument("--judge-api-base", metavar="URL",
+                             default="https://openrouter.ai/api/v1",
+                             help="Judge API base URL (default: OpenRouter)")
+    model_group.add_argument("--judge-api-key", metavar="KEY",
+                             help="API key for the judge model (default: OPENROUTER_API_KEY env var)")
+    model_group.add_argument("--judge-model", metavar="MODEL",
+                             default=JUDGE_MODEL,
+                             help="Judge model name (default: google/gemini-3-flash-preview)")
     model_group.add_argument("--thinking", action="store_true",
                              help="Enable thinking/reasoning mode")
 
@@ -390,8 +403,13 @@ def main():
 
     # Set up API
     api_key = args.api_key or os.environ.get("OPENROUTER_API_KEY", "")
-    if not api_key and "openrouter" in args.api_base:
+    if not api_key and "openrouter" in args.api_base.lower():
         print("Error: OPENROUTER_API_KEY not set. Use --api-key or set the env var.")
+        sys.exit(1)
+
+    judge_api_key = args.judge_api_key or os.environ.get("OPENROUTER_API_KEY", "")
+    if not judge_api_key and "openrouter" in args.judge_api_base.lower():
+        print("Error: judge API key not set. Use --judge-api-key or set OPENROUTER_API_KEY.")
         sys.exit(1)
 
     # Sample probes if requested
@@ -416,12 +434,8 @@ def main():
     else:
         print(f"  Model OK: {test_resp[:60]}")
 
-    # Judge always uses OpenRouter (needs valid OPENROUTER_API_KEY)
-    judge_key = os.environ.get("OPENROUTER_API_KEY", api_key)
-    if not judge_key:
-        print(f"  Error: OPENROUTER_API_KEY needed for the judge model. Set it as env var.")
-        sys.exit(1)
-    judge_fn = make_judge_fn(judge_key)
+    # Judge uses the configured judge API and model.
+    judge_fn = make_judge_fn(args.judge_api_base, judge_api_key, args.judge_model)
 
     # Run evaluation
     total = len(probes)
